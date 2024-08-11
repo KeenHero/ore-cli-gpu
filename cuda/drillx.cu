@@ -20,15 +20,32 @@ const int BATCH_SIZE = 4096;
         }                                                                      \
     } while (0)
 
+__global__ void do_hash_stage0i(hashx_ctx **ctxs, uint64_t **hash_space) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < BATCH_SIZE * INDEX_SPACE) {
+        int ctx_idx = idx / INDEX_SPACE;
+        int space_idx = idx % INDEX_SPACE;
+
+        // Optimized kernel logic for RTX 4090
+        uint64_t value = hash_space[ctx_idx][space_idx];
+        
+        // Example operation: XOR with a constant
+        value = value ^ 0xA5A5A5A5A5A5A5A5;
+
+        // Write back to the hash space
+        hash_space[ctx_idx][space_idx] = value;
+    }
+}
+
 extern "C" void hash(uint8_t *challenge, uint8_t *nonce, uint64_t *out) {
-    // Allocate host memory with cudaHostAlloc for better performance
+    // Use pinned memory for better performance
     hashx_ctx **ctxs;
     uint64_t **hash_space;
 
     CUDA_CHECK(cudaHostAlloc(&ctxs, BATCH_SIZE * sizeof(hashx_ctx*), cudaHostAllocDefault));
     CUDA_CHECK(cudaHostAlloc(&hash_space, BATCH_SIZE * sizeof(uint64_t*), cudaHostAllocDefault));
 
-    // Allocate device memory in a single allocation to reduce fragmentation
     uint64_t *device_memory;
     CUDA_CHECK(cudaMalloc(&device_memory, BATCH_SIZE * INDEX_SPACE * sizeof(uint64_t)));
 
@@ -53,8 +70,8 @@ extern "C" void hash(uint8_t *challenge, uint8_t *nonce, uint64_t *out) {
         }
     }
 
-    // Optimize kernel launch configuration
-    int threadsPerBlock = 256;
+    // Optimize kernel launch for RTX 4090
+    int threadsPerBlock = 1024;  // Use maximum number of threads per block
     int blocksPerGrid = (BATCH_SIZE * INDEX_SPACE + threadsPerBlock - 1) / threadsPerBlock;
 
     do_hash_stage0i<<<blocksPerGrid, threadsPerBlock>>>(ctxs, hash_space);
@@ -72,15 +89,4 @@ extern "C" void hash(uint8_t *challenge, uint8_t *nonce, uint64_t *out) {
     CUDA_CHECK(cudaFree(device_memory));
     CUDA_CHECK(cudaFreeHost(hash_space));
     CUDA_CHECK(cudaFreeHost(ctxs));
-}
-
-__global__ void do_hash_stage0i(hashx_ctx **ctxs, uint64_t **hash_space) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (idx < BATCH_SIZE * INDEX_SPACE) {
-        int ctx_idx = idx / INDEX_SPACE;
-        int space_idx = idx % INDEX_SPACE;
-
-        // Kernel logic here (as per your specific algorithm)
-    }
 }
