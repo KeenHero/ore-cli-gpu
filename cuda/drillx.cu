@@ -20,39 +20,33 @@ const int BATCH_SIZE = 4096;
         }                                                                      \
     } while (0)
 
-__global__ void do_hash_stage0i(hashx_ctx **ctxs, uint64_t **hash_space) {
+__global__ void do_hash_stage0i(hashx_ctx **ctxs, uint64_t *hash_space) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (idx < BATCH_SIZE * INDEX_SPACE) {
-        int ctx_idx = idx / INDEX_SPACE;
-        int space_idx = idx % INDEX_SPACE;
+        uint64_t value = hash_space[idx];
 
-        // Optimized kernel logic for RTX 4090
-        uint64_t value = hash_space[ctx_idx][space_idx];
-        
         // Example operation: XOR with a constant
-        value = value ^ 0xA5A5A5A5A5A5A5A5;
+        value ^= 0xA5A5A5A5A5A5A5A5;
 
         // Write back to the hash space
-        hash_space[ctx_idx][space_idx] = value;
+        hash_space[idx] = value;
     }
 }
 
 extern "C" void hash(uint8_t *challenge, uint8_t *nonce, uint64_t *out) {
     // Use pinned memory for better performance
     hashx_ctx **ctxs;
-    uint64_t **hash_space;
+    uint64_t *hash_space;
 
-    CUDA_CHECK(cudaHostAlloc(&ctxs, BATCH_SIZE * sizeof(hashx_ctx*), cudaHostAllocDefault));
-    CUDA_CHECK(cudaHostAlloc(&hash_space, BATCH_SIZE * sizeof(uint64_t*), cudaHostAllocDefault));
+    CUDA_CHECK(cudaHostAlloc(&ctxs, BATCH_SIZE * sizeof(hashx_ctx*), cudaHostAllocMapped));
+    CUDA_CHECK(cudaHostAlloc(&hash_space, BATCH_SIZE * INDEX_SPACE * sizeof(uint64_t), cudaHostAllocMapped));
 
     uint64_t *device_memory;
     CUDA_CHECK(cudaMalloc(&device_memory, BATCH_SIZE * INDEX_SPACE * sizeof(uint64_t)));
 
     // Initialize contexts and hash space
     for (int i = 0; i < BATCH_SIZE; i++) {
-        hash_space[i] = device_memory + i * INDEX_SPACE;
-
         uint8_t seed[40];
         memcpy(seed, challenge, 32);
         uint64_t nonce_offset = *((uint64_t *)nonce) + i;
@@ -68,13 +62,21 @@ extern "C" void hash(uint8_t *challenge, uint8_t *nonce, uint64_t *out) {
             CUDA_CHECK(cudaFreeHost(ctxs));
             return;
         }
+
+        // Precompute values in the CPU and transfer to GPU
+        for (int j = 0; j < INDEX_SPACE; j++) {
+            hash_space[i * INDEX_SPACE + j] = precompute_value(ctxs[i], j);  // Assuming a precompute function
+        }
     }
 
+    // Copy precomputed data to the device
+    CUDA_CHECK(cudaMemcpy(device_memory, hash_space, BATCH_SIZE * INDEX_SPACE * sizeof(uint64_t), cudaMemcpyHostToDevice));
+
     // Optimize kernel launch for RTX 4090
-    int threadsPerBlock = 1024;  // Use maximum number of threads per block
+    int threadsPerBlock = 1024;  // Max threads per block
     int blocksPerGrid = (BATCH_SIZE * INDEX_SPACE + threadsPerBlock - 1) / threadsPerBlock;
 
-    do_hash_stage0i<<<blocksPerGrid, threadsPerBlock>>>(ctxs, hash_space);
+    do_hash_stage0i<<<blocksPerGrid, threadsPerBlock>>>(ctxs, device_memory);
     CUDA_CHECK(cudaGetLastError()); // Check for launch errors
 
     CUDA_CHECK(cudaDeviceSynchronize()); // Ensure all kernels are finished
